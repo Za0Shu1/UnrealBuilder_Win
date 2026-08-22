@@ -1,0 +1,9 @@
+# Build artifacts (PyInstaller)
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# Local config (never commit)
+*.json.bak
