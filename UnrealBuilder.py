@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 import winsound
 from tkinter import filedialog, messagebox, ttk
 
@@ -133,6 +134,57 @@ PLATFORMS = ["Win64", "Win32", "Linux", "Mac", "Android", "IOS", "TVOS", "HoloLe
 CONFIGS = ["DebugGame", "Development", "Shipping", "Test"]
 
 
+class EllipsisLabel(tk.Label):
+    """A label that truncates its text with an ellipsis when too wide,
+    and shows the full text in a tooltip on hover."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, anchor="w", **kw)
+        self._full = ""
+        self._tip = None
+        self.bind("<Configure>", lambda e: self._refresh())
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def set_text(self, text):
+        self._full = text or ""
+        self._refresh()
+
+    def _refresh(self):
+        width = self.winfo_width()
+        font = tkfont.Font(font=self.cget("font"))
+        if width > 1 and font.measure(self._full) > width:
+            text = self._full
+            while text and font.measure(text + "...") > width:
+                text = text[:-1]
+            self.configure(text=text + "...")
+        else:
+            self.configure(text=self._full)
+
+    def _on_enter(self, _event):
+        if self.cget("text") == self._full:
+            return
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 2
+        self._tip = tk.Toplevel(self)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry("+%d+%d" % (x, y))
+        tk.Label(self._tip, text=self._full, bg="#ffffe0", relief="solid",
+                 borderwidth=1).pack()
+        self._tip.after(3000, self._hide_tip)
+
+    def _on_leave(self, _event):
+        self._hide_tip()
+
+    def _hide_tip(self):
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
 class BuildThread(threading.Thread):
     def __init__(self, cmd, log_cb, done_cb):
         super().__init__(daemon=True)
@@ -231,7 +283,9 @@ class App:
         self.cancel_btn = ttk.Button(row3, text="Cancel", command=self.on_cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=4)
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(row3, textvariable=self.status_var).pack(side="left", padx=12, fill="x", expand=True)
+        self.status_label = EllipsisLabel(row3, width=40)
+        self.status_label.pack(side="left", padx=12, fill="x", expand=True)
+        self.status_label.set_text(self.status_var.get())
         # Shown for 1 minute after a successful package (auto-hides).
         self.open_dir_btn = ttk.Button(row3, text="Open Output", command=self.open_output)
         self.open_dir_btn.pack(side="right")
@@ -278,6 +332,7 @@ class App:
 
     def set_status(self, text):
         self.status_var.set(text)
+        self.status_label.set_text(text)
 
     def refresh_project_list(self):
         self.uproject_combo["values"] = self.uprojects
@@ -405,7 +460,7 @@ class App:
             "-WaitMutex",
         ]
         self.log_line("$ %s\n" % " ".join(cmd))
-        self.start_build(cmd, "Compiling %s %s %s ..." % (target, platform, config), action="compile")
+        self.start_build(cmd, "Compiling %s %s %s" % (target, platform, config), action="compile")
 
     def on_package(self):
         uproject = self.uproject_var.get().strip()
@@ -454,7 +509,7 @@ class App:
             "-ArchiveDirectory=%s" % output,
         ]
         self.log_line("$ %s\n" % " ".join(cmd))
-        self.start_build(cmd, "Packaging %s %s ..." % (platform, config),
+        self.start_build(cmd, "Packaging %s %s" % (platform, config),
                          action="package", output_dir=output)
 
     def start_build(self, cmd, status, action=None, output_dir=None):
@@ -504,7 +559,7 @@ class App:
     def on_cancel(self):
         if self.build_thread:
             self.build_thread.cancel()
-            self.set_status("Cancelling...")
+            self.set_status("Cancelling")
 
 
 def resource_path(relative):
