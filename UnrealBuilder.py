@@ -157,7 +157,7 @@ class BuildThread(threading.Thread):
             )
         except Exception as exc:
             self.log_cb("Failed to start process: %s\n" % exc)
-            self.done_cb(False)
+            self.done_cb(False, False)
             return
         for line in proc.stdout:
             self.log_cb(line)
@@ -165,8 +165,9 @@ class BuildThread(threading.Thread):
                 proc.kill()
                 break
         proc.wait()
+        cancelled = self._cancel.is_set()
         self.log_cb("\n[exit code %d]\n" % proc.returncode)
-        self.done_cb(self._cancel.is_set() or proc.returncode == 0)
+        self.done_cb(not cancelled and proc.returncode == 0, cancelled)
 
 
 class App:
@@ -464,25 +465,31 @@ class App:
         self._action = action
         self._output_dir = output_dir
         safe_log = lambda text: self.root.after(0, self.log_line, text)
-        safe_done = lambda ok: self.root.after(0, self.on_build_done, ok)
+        safe_done = lambda ok, cancelled: self.root.after(0, self.on_build_done, ok, cancelled)
         self.build_thread = BuildThread(cmd, safe_log, safe_done)
         self.build_thread.start()
 
-    def on_build_done(self, ok):
+    def on_build_done(self, ok, cancelled):
         self.compile_btn.configure(state="normal")
         self.package_btn.configure(state="normal")
         self.cancel_btn.configure(state="disabled")
-        self.set_status("Finished (exit code %d)" % (0 if ok else 1))
         self.build_thread = None
 
-        if ok:
+        if cancelled:
+            self.set_status("Cancelled (exit code 1)")
+            winsound.MessageBeep(winsound.MB_ICONHAND)
+            self.hide_open_btn()
+        elif ok:
+            self.set_status("Finished (exit code 0)")
             # A short chime like the editor's build-done sound.
             winsound.MessageBeep(winsound.MB_ICONASTERISK)
             if getattr(self, "_action", None) == "package" and getattr(self, "_output_dir", None):
                 self._open_until = self.root.after(60000, self.hide_open_btn)
                 self.open_dir_btn.pack(side="right")
         else:
+            self.set_status("Failed (exit code 1)")
             winsound.MessageBeep(winsound.MB_ICONHAND)
+            self.hide_open_btn()
 
     def open_output(self):
         if getattr(self, "_output_dir", None):
