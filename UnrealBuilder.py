@@ -313,9 +313,19 @@ class App:
 
     # ---- events --------------------------------------------------------
     def on_scan(self):
-        root_dir = filedialog.askdirectory(title="Select a folder to scan for .uproject files")
+        cfg = load_config()
+        initial = cfg.get("scan_dir")
+        if not initial or not os.path.isdir(initial):
+            initial = None
+        root_dir = filedialog.askdirectory(
+            title="Select a folder to scan for .uproject files",
+            initialdir=initial,
+        )
         if not root_dir:
             return
+        root_dir = normalize_path(root_dir)
+        cfg["scan_dir"] = root_dir
+        save_config(cfg)
         found = scan_uprojects(root_dir)
         if not found:
             messagebox.showinfo(APP_TITLE, "No .uproject files found under:\n%s" % root_dir)
@@ -404,9 +414,12 @@ class App:
             messagebox.showerror(APP_TITLE, err)
             return
 
-        # Reuse the last package output dir; default to the project root.
+        # Per-project package output dir: keyed by the uproject path so each
+        # project remembers its own output; fall back to the project root.
         cfg = load_config()
-        default_output = cfg.get("package_output") or find_uproject_root(uproject)
+        outputs = cfg.get("package_outputs") or {}
+        uproject = normalize_path(uproject)
+        default_output = outputs.get(uproject) or find_uproject_root(uproject)
         if not os.path.isdir(default_output):
             default_output = find_uproject_root(uproject)
         output = filedialog.askdirectory(
@@ -415,7 +428,8 @@ class App:
         )
         if not output:
             return
-        cfg["package_output"] = output
+        outputs[uproject] = normalize_path(output)
+        cfg["package_outputs"] = outputs
         save_config(cfg)
         os.makedirs(output, exist_ok=True)
 

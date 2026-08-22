@@ -45,7 +45,11 @@ python -m PyInstaller --noconfirm --onefile --windowed --name UnrealBuilder ^
 
 ## 配置持久化
 
-- 上次选中的工程、项目列表、打包输出目录保存在 `%APPDATA%\UnrealBuilder\unreal_builder_config.json`
+保存在 `%APPDATA%\UnrealBuilder\unreal_builder_config.json`：
+
+- `last_project` / `projects`：上次选中的工程、项目列表
+- `scan_dir`：上次 Scan 的根目录（与 Package 路径相互独立）
+- `package_outputs`：**按工程分别持久化**的打包输出目录（key 为 uproject 路径），每个工程记住自己的输出路径，未设置时默认该工程根目录
 - 重新 Scan 会以新扫描结果**替换**整个项目列表（相当于过滤器），而不是累加
 
 ## 环境
