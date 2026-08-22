@@ -25,7 +25,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import winreg
 
-APP_TITLE = "Unreal Builder · Za0Shu1"
+APP_TITLE = "Unreal Builder · by Za0Shu1"
 CONFIG_NAME = "unreal_builder_config.json"
 
 
@@ -194,8 +194,8 @@ class App:
         )
         self.uproject_combo.pack(side="left", padx=4)
         self.uproject_combo.bind("<<ComboboxSelected>>", lambda e: self.on_project_selected())
-        ttk.Button(row, text="Scan Folder...", command=self.on_scan).pack(side="left", padx=2)
-        ttk.Button(row, text="Browse...", command=self.on_browse).pack(side="left", padx=2)
+        ttk.Button(row, text="Scan Folder", command=self.on_scan).pack(side="left", padx=2)
+        ttk.Button(row, text="Browse", command=self.on_browse).pack(side="left", padx=2)
 
         # Detected info
         info = ttk.Frame(frm)
@@ -230,7 +230,7 @@ class App:
         self.cancel_btn = ttk.Button(row3, text="Cancel", command=self.on_cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=4)
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(row3, textvariable=self.status_var).pack(side="left", padx=12)
+        ttk.Label(row3, textvariable=self.status_var).pack(side="left", padx=12, fill="x", expand=True)
         # Shown for 1 minute after a successful package (auto-hides).
         self.open_dir_btn = ttk.Button(row3, text="Open Output", command=self.open_output)
         self.open_dir_btn.pack(side="right")
@@ -339,8 +339,13 @@ class App:
         self.set_status("Found %d project(s)" % len(found))
 
     def on_browse(self):
+        cfg = load_config()
+        initial = cfg.get("scan_dir")
+        if not initial or not os.path.isdir(initial):
+            initial = None
         path = filedialog.askopenfilename(
             title="Select a .uproject",
+            initialdir=initial,
             filetypes=[("UE project", "*.uproject"), ("All files", "*.*")],
         )
         if not path:

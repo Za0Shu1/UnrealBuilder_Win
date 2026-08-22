@@ -1,10 +1,10 @@
-# Unreal Builder · Za0Shu1
+# Unreal Builder · by Za0Shu1
 
 一个用于 **Unreal Engine 项目编译与打包** 的 Windows 桌面小工具（Python + Tkinter 编写，PyInstaller 打包为单文件 exe）。
 
 ## 功能
 
-- **工程选择**：扫描文件夹自动发现 `.uproject`，或手动 Browse 指定；选中的工程路径自动持久化，下次启动直接恢复
+- **工程选择**：扫描文件夹自动发现 `.uproject`（Scan Folder，持久化上次扫描目录），或手动 Browse 指定（默认定位到上次扫描目录，选中工程会记住）；选中的工程路径自动持久化，下次启动直接恢复
 - **引擎自动定位**：读取 `.uproject` 的 `EngineAssociation`，通过注册表自动找到对应引擎的 `Build.bat` / `RunUAT.bat`
 - **Compile**：调用引擎 `Build.bat` 编译当前工程（默认 Editor 目标），适合日常编译后打开 UE 编辑器
 - **Package**：调用 `RunUAT.bat BuildCookRun` 完整打包（Cook + Stage + Pak），打包输出目录持久化
