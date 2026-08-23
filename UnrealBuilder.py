@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import winsound
@@ -92,6 +93,40 @@ def engine_from_association(assoc, uproject_path):
     return None, "engine '%s' not found in registry (is it a source build?)" % assoc
 
 
+def list_engines():
+    """Return [(association, path), ...] for every engine registered on this
+    machine (Launcher builds under the registry, deduplicated)."""
+    engines = {}
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for sub in ("SOFTWARE\\EpicGames\\Unreal Engine",
+                    "SOFTWARE\\WOW6432Node\\EpicGames\\Unreal Engine"):
+            try:
+                key = winreg.OpenKey(hive, sub)
+            except OSError:
+                continue
+            try:
+                index = 0
+                while True:
+                    try:
+                        assoc = winreg.EnumKey(key, index)
+                    except OSError:
+                        break
+                    index += 1
+                    try:
+                        eng_key = winreg.OpenKey(key, assoc)
+                    except OSError:
+                        continue
+                    try:
+                        value, _ = winreg.QueryValueEx(eng_key, "InstalledDirectory")
+                        if value and os.path.isdir(value):
+                            engines.setdefault(assoc, os.path.normpath(value))
+                    finally:
+                        winreg.CloseKey(eng_key)
+            finally:
+                winreg.CloseKey(key)
+    return sorted(engines.items())
+
+
 def find_build_bat(engine_root):
     candidate = os.path.join(engine_root, "Engine", "Build", "BatchFiles", "Build.bat")
     if os.path.exists(candidate):
@@ -104,6 +139,15 @@ def find_runuat_bat(engine_root):
     if os.path.exists(candidate):
         return candidate, None
     return None, "RunUAT.bat not found: %s" % candidate
+
+
+def find_ubt(engine_root):
+    candidate = os.path.join(
+        engine_root, "Engine", "Binaries", "DotNET", "UnrealBuildTool", "UnrealBuildTool.exe"
+    )
+    if os.path.exists(candidate):
+        return candidate, None
+    return None, "UnrealBuildTool.exe not found: %s" % candidate
 
 
 def find_targets(uproject_root):
@@ -120,6 +164,11 @@ def find_targets(uproject_root):
     return editors if editors else targets
 
 
+def is_cpp_project(uproject_path):
+    """True if the project has C++ source (i.e. Target.cs files exist)."""
+    return bool(find_targets(find_uproject_root(uproject_path)))
+
+
 def scan_uprojects(root):
     found = []
     if root and os.path.isdir(root):
@@ -128,6 +177,27 @@ def scan_uprojects(root):
                 if f.endswith(".uproject"):
                     found.append(normalize_path(os.path.join(dirpath, f)))
     return sorted(found)
+
+
+def center_window(win, width, height):
+    """Set a fixed size for a Toplevel and center it on the screen."""
+    win.update_idletasks()
+    win.geometry("%dx%d" % (width, height))
+    win.update_idletasks()
+    w = max(win.winfo_width(), width)
+    h = max(win.winfo_height(), height)
+    x = max((win.winfo_screenwidth() - w) // 2, 0)
+    y = max((win.winfo_screenheight() - h) // 2, 0)
+    win.geometry("+%d+%d" % (x, y))
+
+
+def set_window_icon(win):
+    ico = resource_path("Default.ico")
+    if os.path.exists(ico):
+        try:
+            win.iconbitmap(ico)
+        except tk.TclError:
+            pass
 
 
 PLATFORMS = ["Win64", "Win32", "Linux", "Mac", "Android", "IOS", "TVOS", "HoloLens"]
@@ -218,7 +288,6 @@ class BuildThread(threading.Thread):
                 break
         proc.wait()
         cancelled = self._cancel.is_set()
-        self.log_cb("\n[exit code %d]\n" % proc.returncode)
         self.done_cb(not cancelled and proc.returncode == 0, cancelled)
 
 
@@ -237,59 +306,97 @@ class App:
         frm = ttk.Frame(root, padding=10)
         frm.pack(fill="both", expand=True)
 
-        # Project row
-        row = ttk.Frame(frm)
-        row.pack(fill="x", **pad)
+        # ---- 1. Project selection (object selection) ----
+        proj_box = ttk.LabelFrame(frm, text="Project", padding=6)
+        proj_box.pack(fill="x", **pad)
+
+        row = ttk.Frame(proj_box)
+        row.pack(fill="x")
         ttk.Label(row, text="Unreal Project:").pack(side="left")
         self.uproject_var = tk.StringVar()
         self.uproject_combo = ttk.Combobox(
-            row, textvariable=self.uproject_var, state="normal", width=60
+            row, textvariable=self.uproject_var, state="normal", width=50
         )
         self.uproject_combo.pack(side="left", padx=4)
         self.uproject_combo.bind("<<ComboboxSelected>>", lambda e: self.on_project_selected())
+        self.uproject_combo.bind("<Button-3>", self.show_project_menu)
         ttk.Button(row, text="Scan Folder", command=self.on_scan).pack(side="left", padx=2)
         ttk.Button(row, text="Browse", command=self.on_browse).pack(side="left", padx=2)
 
-        # Detected info
-        info = ttk.Frame(frm)
-        info.pack(fill="x", **pad)
+        info = ttk.Frame(proj_box)
+        info.pack(fill="x", pady=(4, 0))
         ttk.Label(info, text="Engine:").pack(side="left")
         self.engine_var = tk.StringVar(value="(select a project)")
-        ttk.Entry(info, textvariable=self.engine_var, state="readonly", width=70).pack(
+        ttk.Entry(info, textvariable=self.engine_var, state="readonly", width=60).pack(
             side="left", padx=4
         )
 
-        # Platform / config
-        row2 = ttk.Frame(frm)
-        row2.pack(fill="x", **pad)
-        ttk.Label(row2, text="Platform:").pack(side="left")
+        # Right-click menu on the project combobox.
+        self.project_menu = tk.Menu(self.root, tearoff=0)
+        self.project_menu.add_command(
+            label="Generate Visual Studio Project files", command=self.on_generate_vs
+        )
+        self.project_menu.add_command(
+            label="Switch Unreal Engine Version...", command=self.on_switch_engine
+        )
+
+        # ---- 2. Functions ----
+        act_box = ttk.LabelFrame(frm, text="Actions", padding=6)
+        act_box.pack(fill="x", **pad)
+
+        # Project utility functions
+        rowf = ttk.Frame(act_box)
+        rowf.pack(fill="x")
+        self.open_project_btn = ttk.Button(rowf, text="Open Project", command=self.on_open_project)
+        self.open_project_btn.pack(side="left")
+        self.open_folder_btn = ttk.Button(rowf, text="Open Folder", command=self.on_open_dir)
+        self.open_folder_btn.pack(side="left", padx=4)
+        self.switch_engine_btn = ttk.Button(
+            rowf, text="Switch Unreal Engine Version", command=self.on_switch_engine
+        )
+        self.switch_engine_btn.pack(side="left", padx=4)
+        self.genvs_btn = ttk.Button(
+            rowf, text="Generate Visual Studio Project Files", command=self.on_generate_vs
+        )
+        self.genvs_btn.pack(side="left", padx=4)
+
+        # Compile: Platform / Config are its required sub-options
+        rowc = ttk.Frame(act_box)
+        rowc.pack(fill="x", pady=(6, 0))
+        ttk.Label(rowc, text="Compile:").pack(side="left")
+        ttk.Label(rowc, text="Platform:").pack(side="left", padx=(8, 2))
         self.platform_var = tk.StringVar(value="Win64")
         ttk.Combobox(
-            row2, textvariable=self.platform_var, values=PLATFORMS, state="readonly", width=10
-        ).pack(side="left", padx=4)
-        ttk.Label(row2, text="Config:").pack(side="left", padx=(12, 2))
+            rowc, textvariable=self.platform_var, values=PLATFORMS, state="readonly", width=10
+        ).pack(side="left", padx=2)
+        ttk.Label(rowc, text="Config:").pack(side="left", padx=(10, 2))
         self.config_var = tk.StringVar(value="Development")
         ttk.Combobox(
-            row2, textvariable=self.config_var, values=CONFIGS, state="readonly", width=12
-        ).pack(side="left", padx=4)
+            rowc, textvariable=self.config_var, values=CONFIGS, state="readonly", width=12
+        ).pack(side="left", padx=2)
+        self.compile_btn = ttk.Button(rowc, text="Compile", command=self.on_compile)
+        self.compile_btn.pack(side="left", padx=6)
 
-        # Actions
-        row3 = ttk.Frame(frm)
-        row3.pack(fill="x", **pad)
-        self.compile_btn = ttk.Button(row3, text="Compile", command=self.on_compile)
-        self.compile_btn.pack(side="left")
-        self.package_btn = ttk.Button(row3, text="Package", command=self.on_package)
-        self.package_btn.pack(side="left", padx=4)
-        self.cancel_btn = ttk.Button(row3, text="Cancel", command=self.on_cancel, state="disabled")
-        self.cancel_btn.pack(side="left", padx=4)
+        # Package: output path is chosen via dialog (its required sub-option)
+        rowp = ttk.Frame(act_box)
+        rowp.pack(fill="x", pady=(6, 0))
+        ttk.Label(rowp, text="Package:").pack(side="left")
+        self.package_btn = ttk.Button(rowp, text="Package", command=self.on_package)
+        self.package_btn.pack(side="left", padx=6)
+        # Shown for 1 minute after a successful package (auto-hides).
+        self.open_dir_btn = ttk.Button(rowp, text="Open Output", command=self.open_output)
+        self.open_dir_btn.pack(side="left", padx=4)
+        self.open_dir_btn.pack_forget()
+
+        # Status / cancel row
+        rowst = ttk.Frame(frm)
+        rowst.pack(fill="x", **pad)
+        self.cancel_btn = ttk.Button(rowst, text="Cancel", command=self.on_cancel, state="disabled")
+        self.cancel_btn.pack(side="left")
         self.status_var = tk.StringVar(value="Ready")
-        self.status_label = EllipsisLabel(row3, width=40)
+        self.status_label = EllipsisLabel(rowst, width=40)
         self.status_label.pack(side="left", padx=12, fill="x", expand=True)
         self.status_label.set_text(self.status_var.get())
-        # Shown for 1 minute after a successful package (auto-hides).
-        self.open_dir_btn = ttk.Button(row3, text="Open Output", command=self.open_output)
-        self.open_dir_btn.pack(side="right")
-        self.open_dir_btn.pack_forget()
 
         # Log area
         logfrm = ttk.Frame(frm)
@@ -313,6 +420,13 @@ class App:
     def log_line(self, text):
         self.log.insert("end", text)
         self.log.see("end")
+
+    def log_banner(self, text, closing=False):
+        line = "=" * 80
+        if closing:
+            self.log_line("\n---- %s ----\n%s\n" % (text, line))
+        else:
+            self.log_line("\n%s\n---- %s ----\n\n" % (line, text))
 
     def show_log_menu(self, event):
         try:
@@ -432,6 +546,130 @@ class App:
         self.engine_var.set(engine_root)
         self.set_status("Project selected: %s" % os.path.basename(path))
 
+    def show_project_menu(self, event):
+        try:
+            self.project_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.project_menu.grab_release()
+
+    def on_open_project(self):
+        uproject = self.uproject_var.get().strip()
+        if not uproject or not os.path.isfile(uproject):
+            messagebox.showwarning(APP_TITLE, "Pick a valid project first.")
+            return
+        try:
+            os.startfile(uproject)
+        except OSError as exc:
+            messagebox.showerror(APP_TITLE, "Cannot open project: %s" % exc)
+
+    def on_open_dir(self):
+        uproject = self.uproject_var.get().strip()
+        if not uproject or not os.path.isfile(uproject):
+            messagebox.showwarning(APP_TITLE, "Pick a valid project first.")
+            return
+        try:
+            os.startfile(find_uproject_root(uproject))
+        except OSError as exc:
+            messagebox.showerror(APP_TITLE, "Cannot open directory: %s" % exc)
+
+    def on_generate_vs(self):
+        uproject = self.uproject_var.get().strip()
+        engine_root = self.engine_var.get().strip()
+        if not uproject or not engine_root or "(engine" in engine_root:
+            messagebox.showwarning(APP_TITLE, "Pick a valid project first.")
+            return
+        ubt, err = find_ubt(engine_root)
+        if err:
+            messagebox.showerror(APP_TITLE, err)
+            return
+        cmd = [ubt, "-projectfiles", "-project=%s" % uproject, "-game"]
+        self.start_build(cmd, "Generating Visual Studio project files...", action="genvs")
+
+    def on_switch_engine(self):
+        uproject = self.uproject_var.get().strip()
+        if not uproject or not os.path.isfile(uproject):
+            messagebox.showwarning(APP_TITLE, "Pick a valid project first.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Switch Unreal Engine Version")
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        set_window_icon(dlg)
+
+        body = ttk.Frame(dlg, padding=10)
+        body.pack(fill="both", expand=True)
+
+        rows = []  # (association, path, label)
+        for assoc, path in list_engines():
+            rows.append((assoc, path, "%s  ->  %s" % (assoc, path)))
+
+        ttk.Label(
+            body,
+            text="Select the Unreal Engine version to associate with this project:",
+        ).pack(anchor="w", pady=(0, 6))
+
+        listfrm = ttk.Frame(body)
+        listfrm.pack(fill="both", expand=True)
+        listbox = tk.Listbox(listfrm, width=90, height=12, selectmode="browse")
+        scroll = ttk.Scrollbar(listfrm, orient="vertical", command=listbox.yview)
+        listbox.configure(yscrollcommand=scroll.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        for _, _, label in rows:
+            listbox.insert("end", label)
+        if rows:
+            listbox.selection_set(0)
+
+        def browse_source():
+            path = filedialog.askdirectory(title="Select the root of a source-built engine")
+            if not path:
+                return
+            path = normalize_path(path)
+            if any(os.path.normpath(p) == path for _, p, _ in rows):
+                return
+            rows.append((path, path, "%s  ->  %s" % (path, path)))
+            listbox.insert("end", rows[-1][2])
+            listbox.selection_set("end")
+
+        def apply():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning(APP_TITLE, "Select an engine first.", parent=dlg)
+                return
+            assoc, path, _ = rows[sel[0]]
+            try:
+                with open(uproject, "r", encoding="utf-8-sig") as f:
+                    data = json.load(f)
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, "Cannot read uproject: %s" % exc, parent=dlg)
+                return
+            data["EngineAssociation"] = assoc
+            try:
+                with open(uproject, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4)
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, "Cannot write uproject: %s" % exc, parent=dlg)
+                return
+            dlg.destroy()
+            self.set_status("Engine association set to %s" % assoc)
+            # Re-resolve and refresh the engine directory display.
+            self.on_project_selected()
+            # C++ projects need a fresh project-files regeneration after the
+            # engine switch; pure Blueprint projects are done here.
+            if is_cpp_project(uproject):
+                self.on_generate_vs()
+
+        btns = ttk.Frame(body)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Browse for Source Build...", command=browse_source).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=(4, 0))
+        ttk.Button(btns, text="OK", command=apply).pack(side="right")
+
+        center_window(dlg, 640, 380)
+        dlg.grab_set()
+        dlg.focus_set()
+
     # ---- build actions -------------------------------------------------
     def on_compile(self):
         uproject = self.uproject_var.get().strip()
@@ -459,7 +697,6 @@ class App:
             "-Project=%s" % uproject,
             "-WaitMutex",
         ]
-        self.log_line("$ %s\n" % " ".join(cmd))
         self.start_build(cmd, "Compiling %s %s %s" % (target, platform, config), action="compile")
 
     def on_package(self):
@@ -508,7 +745,6 @@ class App:
             "-Archive",
             "-ArchiveDirectory=%s" % output,
         ]
-        self.log_line("$ %s\n" % " ".join(cmd))
         self.start_build(cmd, "Packaging %s %s" % (platform, config),
                          action="package", output_dir=output)
 
@@ -519,6 +755,7 @@ class App:
         self.set_status(status)
         self._action = action
         self._output_dir = output_dir
+        self.log_banner("%s @ %s" % (status, time.strftime("%Y-%m-%d %H:%M:%S")))
         safe_log = lambda text: self.root.after(0, self.log_line, text)
         safe_done = lambda ok, cancelled: self.root.after(0, self.on_build_done, ok, cancelled)
         self.build_thread = BuildThread(cmd, safe_log, safe_done)
@@ -531,20 +768,22 @@ class App:
         self.build_thread = None
 
         if cancelled:
-            self.set_status("Cancelled (exit code 1)")
+            result = "Cancelled (exit code 1)"
             winsound.MessageBeep(winsound.MB_ICONHAND)
             self.hide_open_btn()
         elif ok:
-            self.set_status("Finished (exit code 0)")
+            result = "Finished (exit code 0)"
             # A short chime like the editor's build-done sound.
             winsound.MessageBeep(winsound.MB_ICONASTERISK)
             if getattr(self, "_action", None) == "package" and getattr(self, "_output_dir", None):
                 self._open_until = self.root.after(60000, self.hide_open_btn)
-                self.open_dir_btn.pack(side="right")
+                self.open_dir_btn.pack(side="left", padx=4)
         else:
-            self.set_status("Failed (exit code 1)")
+            result = "Failed (exit code 1)"
             winsound.MessageBeep(winsound.MB_ICONHAND)
             self.hide_open_btn()
+        self.set_status(result)
+        self.log_banner("%s @ %s" % (result, time.strftime("%Y-%m-%d %H:%M:%S")), closing=True)
 
     def open_output(self):
         if getattr(self, "_output_dir", None):
