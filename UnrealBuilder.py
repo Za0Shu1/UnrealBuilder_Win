@@ -292,16 +292,31 @@ class BuildThread(threading.Thread):
                 errors="replace",
             )
         except Exception as exc:
-            self.log_cb("Failed to start process: %s\n" % exc)
-            self.done_cb(False, False)
+            try:
+                self.log_cb("Failed to start process: %s\n" % exc)
+            except Exception:
+                pass
+            try:
+                self.done_cb(False, False)
+            except Exception:
+                pass
             return
-        for line in self._proc.stdout:
-            self.log_cb(line)
-            if self._cancel.is_set():
-                break
-        self._proc.wait()
+        try:
+            for line in self._proc.stdout:
+                self.log_cb(line)
+                if self._cancel.is_set():
+                    break
+            self._proc.wait()
+        except Exception:
+            # Guard against broken pipes / app shutdown so the thread never
+            # dies with an unhandled exception (which can pop an error dialog
+            # when the window is closed during a build).
+            pass
         cancelled = self._cancel.is_set()
-        self.done_cb(not cancelled and self._proc.returncode == 0, cancelled)
+        try:
+            self.done_cb(not cancelled and self._proc.returncode == 0, cancelled)
+        except Exception:
+            pass
 
 
 class App:
@@ -770,10 +785,20 @@ class App:
         self._action = action
         self._output_dir = output_dir
         self.log_banner("%s @ %s" % (status, time.strftime("%Y-%m-%d %H:%M:%S")))
-        safe_log = lambda text: self.root.after(0, self.log_line, text)
-        safe_done = lambda ok, cancelled: self.root.after(0, self.on_build_done, ok, cancelled)
-        self.build_thread = BuildThread(cmd, safe_log, safe_done)
+        self.build_thread = BuildThread(cmd, self._safe_log, self._safe_done)
         self.build_thread.start()
+
+    def _safe_log(self, text):
+        try:
+            self.root.after(0, self.log_line, text)
+        except tk.TclError:
+            pass
+
+    def _safe_done(self, ok, cancelled):
+        try:
+            self.root.after(0, self.on_build_done, ok, cancelled)
+        except tk.TclError:
+            pass
 
     def on_build_done(self, ok, cancelled):
         self.compile_btn.configure(state="normal")
@@ -817,6 +842,9 @@ class App:
     def on_close(self):
         if self.build_thread:
             self.build_thread.cancel()
+            # Wait briefly so the packaging subprocess tree is killed before
+            # the window is destroyed; avoids orphaned processes and errors.
+            self.build_thread.join(timeout=3)
         self.root.destroy()
 
 
