@@ -262,13 +262,27 @@ class BuildThread(threading.Thread):
         self.log_cb = log_cb
         self.done_cb = done_cb
         self._cancel = threading.Event()
+        self._proc = None
 
     def cancel(self):
         self._cancel.set()
+        if self._proc:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(self._proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
 
     def run(self):
         try:
-            proc = subprocess.Popen(
+            self._proc = subprocess.Popen(
                 self.cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -281,14 +295,13 @@ class BuildThread(threading.Thread):
             self.log_cb("Failed to start process: %s\n" % exc)
             self.done_cb(False, False)
             return
-        for line in proc.stdout:
+        for line in self._proc.stdout:
             self.log_cb(line)
             if self._cancel.is_set():
-                proc.kill()
                 break
-        proc.wait()
+        self._proc.wait()
         cancelled = self._cancel.is_set()
-        self.done_cb(not cancelled and proc.returncode == 0, cancelled)
+        self.done_cb(not cancelled and self._proc.returncode == 0, cancelled)
 
 
 class App:
@@ -301,6 +314,7 @@ class App:
         self._action = None
         self._output_dir = None
         self._open_until = None
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         pad = {"padx": 6, "pady": 4}
         frm = ttk.Frame(root, padding=10)
@@ -799,6 +813,11 @@ class App:
         if self.build_thread:
             self.build_thread.cancel()
             self.set_status("Cancelling")
+
+    def on_close(self):
+        if self.build_thread:
+            self.build_thread.cancel()
+        self.root.destroy()
 
 
 def resource_path(relative):
